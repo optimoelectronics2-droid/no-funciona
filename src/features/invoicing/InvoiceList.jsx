@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState } from 'react'
 import { Copy, Eye, MessageCircle, Pencil, Printer, RotateCcw, Search, Trash2, XCircle } from 'lucide-react'
 import { Button } from '../../components/ui/Button'
 import { Modal } from '../../components/ui/Modal'
@@ -28,13 +28,38 @@ export function InvoiceList() {
   const [deleting, setDeleting] = useState(null)
   const [voidReason, setVoidReason] = useState('')
   const [deleteReason, setDeleteReason] = useState('')
+  const [quickFilter, setQuickFilter] = useState('all')
+  const deferredQuery = useDeferredValue(query)
   const filtered = useMemo(() => invoices.filter((invoice) => {
-    const text = `${invoice.number} ${invoice.ncf || ''} ${invoice.customerName || ''}`.toLowerCase()
-    return text.includes(query.toLowerCase())
+    const customer = customers.find((item) => item.id === invoice.customerId)
+    const text = normalize([
+      invoice.number,
+      invoice.ncf,
+      invoice.ncfType,
+      invoice.customerName,
+      customer?.name,
+      customer?.rnc,
+      customer?.cedula,
+      customer?.phone,
+      customer?.whatsapp,
+      invoice.issuedAt,
+      invoice.createdAt,
+      invoice.issueDate,
+      invoice.status,
+      invoice.mode,
+      invoice.seller,
+      invoice.paymentMethod,
+      (invoice.payments || []).map((payment) => `${payment.method} ${payment.reference}`).join(' '),
+      invoice.totals?.total,
+      ...(invoice.items || []).flatMap((item) => [item.name, item.sku, item.model, item.serial, ...(item.serials || [])]),
+    ].join(' '))
+    const queryText = normalize(deferredQuery)
+    return (!queryText || text.includes(queryText) || queryText.split(/\s+/).every((part) => text.includes(part)))
       && (mode === 'all' || invoice.mode === mode)
       && (status === 'all' || invoice.status === status)
       && (ncfType === 'all' || invoice.ncfType === ncfType)
-  }), [invoices, mode, ncfType, query, status])
+      && matchesQuickFilter(invoice, quickFilter)
+  }), [customers, deferredQuery, invoices, mode, ncfType, quickFilter, status])
   const buckets = buildFiscalBuckets(filtered)
 
   function handleDuplicate(invoiceId) {
@@ -75,7 +100,9 @@ export function InvoiceList() {
     { header: 'Tipo', accessorKey: 'ncfType' },
     { header: 'Cliente', accessorKey: 'customerName' },
     { header: 'Fecha', cell: ({ row }) => formatDate(row.original.issuedAt || row.original.createdAt) },
-    { header: 'Modo ITBIS', accessorKey: 'mode' },
+    { header: 'Pago', cell: ({ row }) => (row.original.payments || []).map((payment) => payment.method).join(', ') || row.original.paymentMethod || '-' },
+    { header: 'Vendedor', cell: ({ row }) => row.original.seller || '-' },
+    { header: 'Items', cell: ({ row }) => (row.original.items || []).length },
     { header: 'Total', cell: ({ row }) => currency.format(row.original.totals?.total || 0) },
     { header: 'Estado', cell: ({ row }) => <span className={row.original.status === 'voided' ? 'text-red-300 line-through' : 'text-emerald-300'}>{row.original.status}</span> },
     {
@@ -102,14 +129,21 @@ export function InvoiceList() {
             <h2 className="font-display text-2xl font-bold">Lista de facturas</h2>
             <p className="text-sm text-white/45">Emitidas, borradores, creditos y anulaciones sin eliminar historial fiscal.</p>
           </div>
-          <div className="toolbar-grid w-full lg:max-w-5xl">
-            <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+          <div className="w-full space-y-3 lg:max-w-5xl">
+            <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-3">
               <Search size={16} className="text-white/35" />
-              <input value={query} onChange={(e) => setQuery(e.target.value)} className="bg-transparent text-sm outline-none" placeholder="NCF, cliente, numero" />
+              <input value={query} onChange={(e) => setQuery(e.target.value)} className="min-w-0 flex-1 bg-transparent text-sm font-bold outline-none placeholder:text-white/35" placeholder="Buscar factura, cliente, NCF, RNC, telefono, producto, vendedor, pago, fecha o total" />
             </div>
-            <select value={mode} onChange={(e) => setMode(e.target.value)} className="input-dark"><option value="all">Modo: todos</option><option value={invoiceModes.TAXED}>Con ITBIS</option><option value={invoiceModes.NO_TAX}>Sin ITBIS</option><option value={invoiceModes.MIXED}>Mixta</option></select>
-            <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-dark"><option value="all">Estado: todos</option><option value="draft">Borrador</option><option value="paid">Pagada</option><option value="credit">Credito</option><option value="voided">Anulada</option></select>
-            <select value={ncfType} onChange={(e) => setNcfType(e.target.value)} className="input-dark"><option value="all">NCF todos</option><option>B01</option><option>B02</option><option>B14</option><option>B15</option><option>E31</option><option>E32</option><option>NO_FISCAL</option></select>
+            <div className="flex flex-wrap gap-2">
+              {quickFilters.map((filter) => (
+                <button key={filter.id} type="button" onClick={() => setQuickFilter(filter.id)} className={`rounded-lg border px-3 py-2 text-xs font-bold transition ${quickFilter === filter.id ? 'border-blue-400 bg-blue-500/15 text-blue-100' : 'border-white/10 bg-white/[0.035] text-white/55 hover:bg-white/[0.07]'}`}>{filter.label}</button>
+              ))}
+            </div>
+            <div className="toolbar-grid">
+              <select value={mode} onChange={(e) => setMode(e.target.value)} className="input-dark"><option value="all">Modo: todos</option><option value={invoiceModes.TAXED}>Con ITBIS</option><option value={invoiceModes.NO_TAX}>Sin ITBIS</option><option value={invoiceModes.MIXED}>Mixta</option></select>
+              <select value={status} onChange={(e) => setStatus(e.target.value)} className="input-dark"><option value="all">Estado: todos</option><option value="draft">Borrador</option><option value="paid">Pagada</option><option value="credit">Credito</option><option value="voided">Anulada</option></select>
+              <select value={ncfType} onChange={(e) => setNcfType(e.target.value)} className="input-dark"><option value="all">NCF todos</option><option>B01</option><option>B02</option><option>B14</option><option>B15</option><option>E31</option><option>E32</option><option>NO_FISCAL</option></select>
+            </div>
           </div>
         </div>
         <DataTable data={filtered} columns={columns} />
@@ -166,4 +200,39 @@ function openWhatsApp(invoice, customers, company) {
   const customer = customers.find((item) => item.id === invoice.customerId)
   const phone = customer?.whatsapp || company.whatsapp
   window.open(`https://wa.me/${phone}?text=${encodeURIComponent(`Factura ${invoice.number} por ${currency.format(invoice.totals?.total || 0)} - ${company.name || 'Trifusion Technologies'}`)}`)
+}
+
+const quickFilters = [
+  { id: 'all', label: 'Todos' },
+  { id: 'today', label: 'Hoy' },
+  { id: 'week', label: 'Esta semana' },
+  { id: 'month', label: 'Este mes' },
+  { id: 'paid', label: 'Pagadas' },
+  { id: 'credit', label: 'Credito' },
+  { id: 'taxed', label: 'Con ITBIS' },
+  { id: 'no_tax', label: 'Sin ITBIS' },
+  { id: 'voided', label: 'Anuladas' },
+]
+
+function matchesQuickFilter(invoice, filter) {
+  const date = new Date(invoice.issuedAt || invoice.createdAt || invoice.issueDate || Date.now())
+  const now = new Date()
+  if (filter === 'today') return date.toISOString().slice(0, 10) === now.toISOString().slice(0, 10)
+  if (filter === 'week') {
+    const start = new Date(now)
+    start.setDate(now.getDate() - now.getDay())
+    start.setHours(0, 0, 0, 0)
+    return date >= start
+  }
+  if (filter === 'month') return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth()
+  if (filter === 'paid') return invoice.status === 'paid'
+  if (filter === 'credit') return invoice.status === 'credit' || (invoice.payments || []).some((payment) => payment.method === 'Credito')
+  if (filter === 'taxed') return invoice.mode === invoiceModes.TAXED || invoice.mode === invoiceModes.MIXED
+  if (filter === 'no_tax') return invoice.mode === invoiceModes.NO_TAX
+  if (filter === 'voided') return invoice.status === 'voided'
+  return true
+}
+
+function normalize(value = '') {
+  return String(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 }

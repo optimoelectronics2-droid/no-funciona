@@ -19,11 +19,17 @@ import { QuoteList } from './features/quotes/QuoteList'
 import { Receivables } from './features/receivables/Receivables'
 import { AuthPage } from './features/auth/AuthPage'
 import { useERPStore } from './store/useERPStore'
+import { startErpRealtimeSync } from './services/realtimeSync'
 
 export default function App() {
   const setCommandOpen = useERPStore((state) => state.setCommandOpen)
+  const syncStatus = useERPStore((state) => state.syncStatus)
   const [authState, setAuthState] = useState({ loading: true, user: null })
   useEffect(() => onAuthStateChanged(auth, (user) => setAuthState({ loading: false, user })), [])
+  useEffect(() => {
+    if (authState.loading) return undefined
+    return startErpRealtimeSync(authState.user)
+  }, [authState.loading, authState.user])
   useEffect(() => {
     const handler = (event) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
@@ -40,6 +46,7 @@ export default function App() {
 
   return (
     <>
+      {syncStatus === 'connecting' || syncStatus === 'uploading' ? <div className="fixed right-4 top-4 z-50 rounded-lg border border-white/10 bg-black/70 px-3 py-2 text-xs font-bold text-white/70">Sincronizando datos...</div> : null}
       <Routes>
         <Route element={<AppShell />}>
           <Route index element={<Dashboard />} />

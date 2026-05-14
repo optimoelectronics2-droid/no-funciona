@@ -85,6 +85,9 @@ export const useERPStore = create(
       selectedBranch: null,
       currentUser: { id: 'local-admin', name: 'Administrador', role: 'Admin' },
       syncStatus: 'local-first',
+      syncUserId: null,
+      syncHydrated: false,
+      syncError: '',
 
       toggleSidebar: () => set((state) => ({ collapsed: !state.collapsed })),
       setCommandOpen: (commandOpen) => set({ commandOpen }),
@@ -760,6 +763,10 @@ export const useERPStore = create(
       name: 'trifusion-erp-state-v2',
       storage: createJSONStorage(() => localStorage),
       version: 2,
+      partialize: (state) => ({
+        collapsed: state.collapsed,
+        commandOpen: false,
+      }),
     },
   ),
 )

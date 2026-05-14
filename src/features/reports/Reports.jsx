@@ -14,6 +14,7 @@ export function Reports() {
   const active = useMemo(() => invoices.filter((invoice) => invoice.status !== 'voided'), [invoices])
   const filtered = useMemo(() => (mode === 'all' ? active : active.filter((invoice) => invoice.mode === mode)), [active, mode])
   const buckets = useMemo(() => buildFiscalBuckets(active), [active])
+  const reportGroups = useMemo(() => buildReportGroups(active), [active])
   const totalGeneral = buckets.taxed.total + buckets.noTax.total + buckets.mixed.total
   const barData = useMemo(() => ({
     labels: ['Periodo'],
@@ -48,10 +49,17 @@ export function Reports() {
 
   function exportExcel() {
     const book = XLSX.utils.book_new()
-    XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet(active.filter((i) => i.mode === invoiceModes.TAXED)), 'Ventas con ITBIS')
-    XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet(active.filter((i) => i.mode === invoiceModes.NO_TAX)), 'Ventas sin ITBIS')
-    XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet(active.filter((i) => i.mode === invoiceModes.MIXED)), 'Ventas mixtas')
-    XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet([{ tipo: 'Con ITBIS', ...buckets.taxed }, { tipo: 'Sin ITBIS', ...buckets.noTax }, { tipo: 'Mixta', ...buckets.mixed }, { tipo: 'Total general', total: totalGeneral }]), 'Resumen consolidado')
+    reportGroups.forEach((group) => {
+      XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet(buildSummaryRows(group)), `${group.sheetName} resumen`)
+      XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet(group.invoices.map(invoiceToReportRow)), `${group.sheetName} facturas`)
+      XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet(group.items), `${group.sheetName} productos`)
+    })
+    XLSX.utils.book_append_sheet(book, XLSX.utils.json_to_sheet([
+      { tipo: 'Con ITBIS', facturas: buckets.taxed.count, subtotal: buckets.taxed.subtotal, itbis: buckets.taxed.itbis, total: buckets.taxed.total, ganancia: buckets.taxed.profit },
+      { tipo: 'Sin ITBIS', facturas: buckets.noTax.count, subtotal: buckets.noTax.total, itbis: 0, total: buckets.noTax.total, ganancia: buckets.noTax.profit },
+      { tipo: 'Mixta', facturas: buckets.mixed.count, subtotal: buckets.mixed.subtotal, itbis: buckets.mixed.itbis, total: buckets.mixed.total, ganancia: buckets.mixed.profit },
+      { tipo: 'Total general', facturas: active.length, subtotal: buckets.taxed.subtotal + buckets.noTax.total + buckets.mixed.subtotal, itbis: buckets.taxed.itbis + buckets.mixed.itbis, total: totalGeneral, ganancia: buckets.taxed.profit + buckets.noTax.profit + buckets.mixed.profit },
+    ]), 'Resumen consolidado')
     XLSX.writeFile(book, 'trifusion-reportes-separados.xlsx')
   }
 
@@ -109,6 +117,9 @@ export function Reports() {
           <p>Ventas MIXTAS: subtotal {currency.format(buckets.mixed.subtotal)} | ITBIS parcial {currency.format(buckets.mixed.itbis)} | Total {currency.format(buckets.mixed.total)}</p>
         </div>
       </section>
+      <section className="space-y-5">
+        {reportGroups.map((group) => <ReportSheet key={group.mode} group={group} />)}
+      </section>
       </div>
     </div>
   )
@@ -119,5 +130,141 @@ function Bucket({ title, bucket, noTax }) {
 }
 function Line({ label, value, raw }) { return <div className="flex justify-between"><span className="text-white/50">{label}</span><span className="font-bold">{raw ? value : currency.format(value || 0)}</span></div> }
 function ChartPanel({ title, children }) { return <div className="panel flex h-80 flex-col rounded-lg p-5"><h3 className="mb-3 font-display text-lg font-bold">{title}</h3><div className="min-h-0 flex-1">{children}</div></div> }
+function ReportSheet({ group }) {
+  return (
+    <article className="panel rounded-lg p-5">
+      <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="text-xs font-extrabold uppercase text-blue-200/80">Hoja separada</p>
+          <h2 className="font-display text-2xl font-bold">{group.title}</h2>
+          <p className="text-sm text-white/45">{group.description}</p>
+        </div>
+        <div className="grid gap-2 text-sm sm:grid-cols-2 lg:min-w-80">
+          <Line label="Facturas" value={group.bucket.count} raw />
+          <Line label="Subtotal" value={group.noTax ? group.bucket.total : group.bucket.subtotal} />
+          <Line label="ITBIS" value={group.noTax ? 0 : group.bucket.itbis} />
+          <Line label="Total" value={group.bucket.total} />
+          <Line label="Ganancia" value={group.bucket.profit} />
+          <Line label="Productos" value={group.items.length} raw />
+        </div>
+      </div>
+      <DataTable data={group.invoices} columns={[
+        { header: 'Factura', cell: ({ row }) => row.original.ncf || row.original.number },
+        { header: 'Cliente', accessorKey: 'customerName' },
+        { header: 'Fecha', cell: ({ row }) => formatDate(row.original.issuedAt || row.original.createdAt || row.original.issueDate) },
+        { header: 'Pago', cell: ({ row }) => (row.original.payments || []).map((payment) => payment.method).join(', ') || row.original.paymentMethod || '-' },
+        { header: 'Productos', cell: ({ row }) => (row.original.items || []).length },
+        { header: 'Subtotal', cell: ({ row }) => currency.format(row.original.totals?.subtotal || row.original.totals?.total || 0) },
+        { header: 'ITBIS', cell: ({ row }) => currency.format(row.original.totals?.itbis || 0) },
+        { header: 'Total', cell: ({ row }) => currency.format(row.original.totals?.total || 0) },
+        { header: 'Ganancia', cell: ({ row }) => currency.format(row.original.totals?.profit || 0) },
+      ]} emptyText={`No hay facturas en ${group.title}.`} />
+      <div className="mt-5">
+        <h3 className="mb-3 font-display text-xl font-bold">Detalle de productos vendidos</h3>
+        <DataTable data={group.items} columns={[
+          { header: 'Factura', accessorKey: 'factura' },
+          { header: 'Cliente', accessorKey: 'cliente' },
+          { header: 'Producto', accessorKey: 'producto' },
+          { header: 'SKU', accessorKey: 'sku' },
+          { header: 'Cantidad', accessorKey: 'cantidad' },
+          { header: 'Precio', cell: ({ row }) => currency.format(row.original.precio) },
+          { header: 'Subtotal', cell: ({ row }) => currency.format(row.original.subtotal) },
+          { header: 'ITBIS', cell: ({ row }) => currency.format(row.original.itbis) },
+          { header: 'Total', cell: ({ row }) => currency.format(row.original.total) },
+          { header: 'Ganancia', cell: ({ row }) => currency.format(row.original.ganancia) },
+        ]} emptyText="No hay productos para este reporte." />
+      </div>
+    </article>
+  )
+}
+
+function buildReportGroups(invoices) {
+  const buckets = buildFiscalBuckets(invoices)
+  return [
+    {
+      mode: invoiceModes.TAXED,
+      title: 'VENTAS CON ITBIS',
+      sheetName: 'Con ITBIS',
+      description: 'Facturas gravadas, ITBIS cobrado, ganancia y detalle de productos.',
+      bucket: buckets.taxed,
+      invoices: invoices.filter((invoice) => invoice.mode === invoiceModes.TAXED),
+    },
+    {
+      mode: invoiceModes.NO_TAX,
+      title: 'VENTAS SIN ITBIS',
+      sheetName: 'Sin ITBIS',
+      description: 'Ventas no gravadas con detalle de facturas, productos y ganancia.',
+      bucket: buckets.noTax,
+      invoices: invoices.filter((invoice) => invoice.mode === invoiceModes.NO_TAX),
+      noTax: true,
+    },
+    {
+      mode: invoiceModes.MIXED,
+      title: 'VENTAS MIXTAS',
+      sheetName: 'Mixtas',
+      description: 'Facturas con lineas gravadas y exentas separadas para revision fiscal.',
+      bucket: buckets.mixed,
+      invoices: invoices.filter((invoice) => invoice.mode === invoiceModes.MIXED),
+    },
+  ].map((group) => ({ ...group, items: group.invoices.flatMap(invoiceToItemRows) }))
+}
+
+function invoiceToReportRow(invoice) {
+  return {
+    factura: invoice.number || '',
+    ncf: invoice.ncf || '',
+    tipoNCF: invoice.ncfType || '',
+    cliente: invoice.customerName || '',
+    rncCedula: invoice.customerRnc || invoice.customerDocument || '',
+    fecha: invoice.issuedAt || invoice.createdAt || invoice.issueDate || '',
+    modo: invoice.mode || '',
+    estado: invoice.status || '',
+    metodoPago: (invoice.payments || []).map((payment) => payment.method).join(', ') || invoice.paymentMethod || '',
+    vendedor: invoice.seller || '',
+    productos: (invoice.items || []).length,
+    subtotal: invoice.totals?.subtotal || invoice.totals?.total || 0,
+    subtotalGravado: invoice.totals?.taxableSubtotal || 0,
+    subtotalExento: invoice.totals?.exemptSubtotal || 0,
+    itbis: invoice.totals?.itbis || 0,
+    total: invoice.totals?.total || 0,
+    ganancia: invoice.totals?.profit || 0,
+  }
+}
+
+function invoiceToItemRows(invoice) {
+  return (invoice.items || []).map((item) => {
+    const subtotal = Number(item.net ?? Number(item.price || 0) * Number(item.quantity || 0))
+    const itbis = Number(item.tax || 0)
+    return {
+      factura: invoice.ncf || invoice.number || '',
+      cliente: invoice.customerName || '',
+      fecha: invoice.issuedAt || invoice.createdAt || invoice.issueDate || '',
+      producto: item.name || '',
+      sku: item.sku || '',
+      modelo: item.model || '',
+      cantidad: Number(item.quantity || 0),
+      precio: Number(item.price || 0),
+      descuento: Number(item.discount || 0),
+      subtotal,
+      itbis,
+      total: subtotal + itbis,
+      costo: Number(item.cost || 0),
+      ganancia: subtotal - (Number(item.cost || 0) * Number(item.quantity || 0)),
+      seriales: (item.serials || (item.serial ? [item.serial] : [])).join(', '),
+      gravado: item.taxable ? 'Si' : 'No',
+    }
+  })
+}
+
+function buildSummaryRows(group) {
+  return [
+    { concepto: 'Facturas', valor: group.bucket.count },
+    { concepto: 'Subtotal', valor: group.noTax ? group.bucket.total : group.bucket.subtotal },
+    { concepto: 'ITBIS', valor: group.noTax ? 0 : group.bucket.itbis },
+    { concepto: 'Total', valor: group.bucket.total },
+    { concepto: 'Ganancia', valor: group.bucket.profit },
+    { concepto: 'Productos vendidos', valor: group.items.reduce((sum, item) => sum + Number(item.cantidad || 0), 0) },
+  ]
+}
 const chartOptions = { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#cbd5e1' } } }, scales: { x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,.06)' } }, y: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,.06)' } } } }
 const doughnutOptions = { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: '#cbd5e1' } } } }

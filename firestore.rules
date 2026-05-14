@@ -4,6 +4,10 @@ service cloud.firestore {
     function signedIn() { return request.auth != null; }
     function roleIn(roles) { return signedIn() && request.auth.token.role in roles; }
 
+    match /accounts/{userId}/{document=**} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
     match /invoices/{id} {
       allow read: if signedIn();
       allow create: if roleIn(['Admin', 'Supervisor', 'Cajero', 'Vendedor']);
