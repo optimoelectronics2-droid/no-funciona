@@ -10,6 +10,7 @@ import { currency, formatDate } from '../../lib/formatters'
 
 export function Reports() {
   const invoices = useERPStore((state) => state.invoices)
+  const company = useERPStore((state) => state.company)
   const [mode, setMode] = useState('all')
   const active = useMemo(() => invoices.filter((invoice) => invoice.status !== 'voided'), [invoices])
   const filtered = useMemo(() => (mode === 'all' ? active : active.filter((invoice) => invoice.mode === mode)), [active, mode])
@@ -78,6 +79,18 @@ export function Reports() {
     window.print()
   }
 
+  async function downloadPdfGroup(mode) {
+    const { buildFiscalReportGroups, downloadFiscalReportPdf } = await import('../../services/fiscalReportPdf')
+    const pdfGroups = buildFiscalReportGroups(active)
+    const group = pdfGroups.find((item) => item.mode === mode)
+    if (group) await downloadFiscalReportPdf({ company, group })
+  }
+
+  async function downloadAllPdfs() {
+    const { downloadAllFiscalReportPdfs } = await import('../../services/fiscalReportPdf')
+    await downloadAllFiscalReportPdfs({ company, invoices: active })
+  }
+
   return (
     <div className="space-y-5">
       <div className="printable-report report-print-area space-y-5">
@@ -89,7 +102,12 @@ export function Reports() {
       <section className="module-surface p-4 sm:p-5">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div><p className="text-sm text-white/45">TOTAL GENERAL</p><p className="font-display text-3xl font-bold">{currency.format(totalGeneral)}</p><p className="text-sm text-white/45">Este total incluye el ITBIS que debe declararse a la DGII.</p></div>
-          <div className="no-print flex flex-wrap gap-2"><Button variant="ghost" icon={Printer} onClick={printReport}>Imprimir / PDF</Button><Button variant="ghost" icon={Download} onClick={exportExcel}>Excel separado</Button><Button variant="ghost" icon={Download} onClick={export607}>607 TXT</Button></div>
+          <div className="no-print flex flex-wrap gap-2">
+            <Button variant="ghost" icon={Printer} onClick={printReport}>Imprimir</Button>
+            <Button variant="primary" icon={Download} onClick={downloadAllPdfs}>PDFs separados</Button>
+            <Button variant="ghost" icon={Download} onClick={exportExcel}>Excel separado</Button>
+            <Button variant="ghost" icon={Download} onClick={export607}>607 TXT</Button>
+          </div>
         </div>
       </section>
       <section className="grid gap-5 xl:grid-cols-3">
@@ -118,7 +136,7 @@ export function Reports() {
         </div>
       </section>
       <section className="space-y-5">
-        {reportGroups.map((group) => <ReportSheet key={group.mode} group={group} />)}
+        {reportGroups.map((group) => <ReportSheet key={group.mode} group={group} onDownload={() => downloadPdfGroup(group.mode)} />)}
       </section>
       </div>
     </div>
@@ -130,7 +148,7 @@ function Bucket({ title, bucket, noTax }) {
 }
 function Line({ label, value, raw }) { return <div className="flex justify-between"><span className="text-white/50">{label}</span><span className="font-bold">{raw ? value : currency.format(value || 0)}</span></div> }
 function ChartPanel({ title, children }) { return <div className="panel flex h-80 flex-col rounded-lg p-5"><h3 className="mb-3 font-display text-lg font-bold">{title}</h3><div className="min-h-0 flex-1">{children}</div></div> }
-function ReportSheet({ group }) {
+function ReportSheet({ group, onDownload }) {
   return (
     <article className="panel rounded-lg p-5">
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -146,6 +164,7 @@ function ReportSheet({ group }) {
           <Line label="Total" value={group.bucket.total} />
           <Line label="Ganancia" value={group.bucket.profit} />
           <Line label="Productos" value={group.items.length} raw />
+          <Button variant="ghost" icon={Download} onClick={onDownload}>Descargar PDF</Button>
         </div>
       </div>
       <DataTable data={group.invoices} columns={[

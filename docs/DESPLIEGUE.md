@@ -40,3 +40,20 @@ Agrega tus dominios publicados en Firebase Authentication:
 Ruta:
 
 `Firebase Console > Authentication > Settings > Authorized domains`
+
+## Firebase Firestore
+
+La sincronizacion en tiempo real usa documentos por cuenta en:
+
+```text
+accounts/{uid}/{coleccion}/{documento}
+```
+
+Las reglas locales en `firestore.rules` ya permiten leer y escribir solo al usuario autenticado que coincide con ese `uid`. Si aparece `FirebaseError: Missing or insufficient permissions` al iniciar sesion, inicia sesion en Firebase CLI y publica las reglas al proyecto configurado:
+
+```bash
+npx firebase-tools login
+npm run deploy:firestore-rules
+```
+
+El proyecto queda fijado en `.firebaserc` como `trifusion-cotizador`, el mismo `projectId` que usa la app en `src/lib/firebase.js`.

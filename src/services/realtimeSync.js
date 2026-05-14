@@ -1,10 +1,9 @@
 import {
-  collection,
   doc,
-  getDocs,
+  getDoc,
   onSnapshot,
+  serverTimestamp,
   setDoc,
-  writeBatch,
 } from 'firebase/firestore'
 import { db } from '../lib/firebase'
 import { useERPStore } from '../store/useERPStore'
@@ -32,7 +31,7 @@ const SINGLETON_SLICES = ['company', 'settings', 'cashRegister', 'categories', '
 const SYNC_DEBOUNCE_MS = 700
 
 let activeUid = ''
-let unsubscribers = []
+let unsubscribeRemote = null
 let unsubscribeStore = null
 let applyingRemote = false
 let syncReady = false
@@ -63,7 +62,7 @@ export function startErpRealtimeSync(user) {
 
   initializeUserSync(user).catch((error) => {
     console.error('No se pudo iniciar la sincronizacion Firestore:', error)
-    useERPStore.setState({ syncStatus: 'error', syncError: error.message || 'Error de sincronizacion' })
+    useERPStore.setState({ syncStatus: 'error', syncError: describeSyncError(error) })
   })
 
   return stopErpRealtimeSync
@@ -72,8 +71,8 @@ export function startErpRealtimeSync(user) {
 export function stopErpRealtimeSync() {
   if (syncTimer) window.clearTimeout(syncTimer)
   syncTimer = null
-  unsubscribers.forEach((unsubscribe) => unsubscribe())
-  unsubscribers = []
+  unsubscribeRemote?.()
+  unsubscribeRemote = null
   unsubscribeStore?.()
   unsubscribeStore = null
   activeUid = ''
@@ -83,60 +82,34 @@ export function stopErpRealtimeSync() {
 }
 
 async function initializeUserSync(user) {
-  const hasRemoteData = await remoteHasData(user.uid)
-  if (!hasRemoteData) {
-    await seedRemoteFromLocal(user.uid, useERPStore.getState())
+  const ref = stateDocRef(user.uid)
+  const snapshot = await getDoc(ref).catch((error) => {
+    throw withSyncPath(error, stateDocPath(user.uid))
+  })
+
+  if (snapshot.exists()) {
+    applyRemoteState(snapshot.data()?.state || {})
+  } else {
+    await writeRemoteState(user.uid, useERPStore.getState())
   }
 
-  subscribeRemote(user.uid)
+  unsubscribeRemote = onSnapshot(ref, (remoteSnapshot) => {
+    if (!remoteSnapshot.exists()) return
+    applyRemoteState(remoteSnapshot.data()?.state || {})
+  }, (error) => handleSyncError(withSyncPath(error, stateDocPath(user.uid))))
+
   previousState = pickSyncState(useERPStore.getState())
   syncReady = true
   useERPStore.setState({ syncStatus: 'synced', syncHydrated: true, syncError: '' })
 
   unsubscribeStore = useERPStore.subscribe((state) => {
     if (!syncReady || applyingRemote || !activeUid) return
-    scheduleLocalDiff(state)
+    scheduleLocalSync(state)
   })
 }
 
-async function remoteHasData(uid) {
-  for (const name of COLLECTION_SLICES) {
-    const snapshot = await getDocs(collection(db, 'accounts', uid, name))
-    if (!snapshot.empty) return true
-  }
-  const meta = await getDocs(collection(db, 'accounts', uid, 'meta'))
-  return !meta.empty
-}
-
-async function seedRemoteFromLocal(uid, state) {
-  useERPStore.setState({ syncStatus: 'uploading' })
-  for (const name of COLLECTION_SLICES) {
-    const items = Array.isArray(state[name]) ? state[name] : []
-    await commitItems(uid, name, items)
-  }
-  await commitSingletons(uid, state)
-}
-
-function subscribeRemote(uid) {
-  COLLECTION_SLICES.forEach((name) => {
-    const unsubscribe = onSnapshot(collection(db, 'accounts', uid, name), (snapshot) => {
-      const items = snapshot.docs.map((item) => normalizeRemoteDoc(item.id, item.data()))
-      applyRemotePatch({ [name]: items })
-    }, handleSyncError)
-    unsubscribers.push(unsubscribe)
-  })
-
-  const unsubscribeMeta = onSnapshot(collection(db, 'accounts', uid, 'meta'), (snapshot) => {
-    const patch = {}
-    snapshot.docs.forEach((item) => {
-      patch[item.id] = item.data()?.value
-    })
-    applyRemotePatch(patch)
-  }, handleSyncError)
-  unsubscribers.push(unsubscribeMeta)
-}
-
-function applyRemotePatch(patch) {
+function applyRemoteState(remoteState) {
+  const patch = pickSyncState({ ...useERPStore.getState(), ...remoteState })
   applyingRemote = true
   useERPStore.setState((state) => ({
     ...state,
@@ -149,88 +122,52 @@ function applyRemotePatch(patch) {
   applyingRemote = false
 }
 
-function scheduleLocalDiff(state) {
+function scheduleLocalSync(state) {
   if (syncTimer) window.clearTimeout(syncTimer)
   syncTimer = window.setTimeout(() => {
     syncTimer = null
-    persistLocalDiff(state).catch(handleSyncError)
+    persistLocalState(state).catch(handleSyncError)
   }, SYNC_DEBOUNCE_MS)
 }
 
-async function persistLocalDiff(state) {
+async function persistLocalState(state) {
   if (!activeUid || !previousState) return
-  useERPStore.setState({ syncStatus: 'syncing' })
   const current = pickSyncState(state)
-  const previous = previousState
+  if (stableStringify(previousState) === stableStringify(current)) return
 
-  for (const name of COLLECTION_SLICES) {
-    await commitCollectionDiff(activeUid, name, previous[name] || [], current[name] || [])
-  }
-
-  for (const name of SINGLETON_SLICES) {
-    if (stableStringify(previous[name]) !== stableStringify(current[name])) {
-      await setDoc(doc(db, 'accounts', activeUid, 'meta', name), { value: sanitizeForFirestore(current[name]) })
-    }
-  }
-
+  useERPStore.setState({ syncStatus: 'syncing' })
+  await writeRemoteState(activeUid, current)
   previousState = pickSyncState(useERPStore.getState())
   useERPStore.setState({ syncStatus: 'synced', syncError: '' })
 }
 
-async function commitCollectionDiff(uid, name, previousItems, currentItems) {
-  const previousById = new Map(previousItems.filter((item) => item?.id).map((item) => [item.id, item]))
-  const currentById = new Map(currentItems.filter((item) => item?.id).map((item) => [item.id, item]))
-  const writes = []
-
-  currentById.forEach((item, itemId) => {
-    if (stableStringify(previousById.get(itemId)) !== stableStringify(item)) {
-      writes.push({ type: 'set', path: doc(db, 'accounts', uid, name, itemId), data: sanitizeForFirestore(item) })
-    }
+async function writeRemoteState(uid, state) {
+  const path = stateDocPath(uid)
+  await setDoc(stateDocRef(uid), {
+    state: sanitizeForFirestore(pickSyncState(state)),
+    updatedAt: serverTimestamp(),
+  }, { merge: true }).catch((error) => {
+    throw withSyncPath(error, path)
   })
-
-  previousById.forEach((_, itemId) => {
-    if (!currentById.has(itemId)) writes.push({ type: 'delete', path: doc(db, 'accounts', uid, name, itemId) })
-  })
-
-  await commitWrites(writes)
-}
-
-async function commitItems(uid, name, items) {
-  const writes = items
-    .filter((item) => item?.id)
-    .map((item) => ({ type: 'set', path: doc(db, 'accounts', uid, name, item.id), data: sanitizeForFirestore(item) }))
-  await commitWrites(writes)
-}
-
-async function commitSingletons(uid, state) {
-  const writes = SINGLETON_SLICES.map((name) => ({
-    type: 'set',
-    path: doc(db, 'accounts', uid, 'meta', name),
-    data: { value: sanitizeForFirestore(state[name]) },
-  }))
-  await commitWrites(writes)
-}
-
-async function commitWrites(writes) {
-  for (let index = 0; index < writes.length; index += 450) {
-    const batch = writeBatch(db)
-    writes.slice(index, index + 450).forEach((write) => {
-      if (write.type === 'delete') batch.delete(write.path)
-      else batch.set(write.path, write.data, { merge: true })
-    })
-    await batch.commit()
-  }
 }
 
 async function handleSyncError(error) {
   console.error('Error de sincronizacion Firestore:', error)
-  useERPStore.setState({ syncStatus: 'error', syncError: error.message || 'Error de sincronizacion' })
+  useERPStore.setState({ syncStatus: 'error', syncError: describeSyncError(error) })
+}
+
+function stateDocRef(uid) {
+  return doc(db, 'accounts', uid, 'erp', 'state')
+}
+
+function stateDocPath(uid) {
+  return `accounts/${uid}/erp/state`
 }
 
 function pickSyncState(state) {
   const picked = {}
   COLLECTION_SLICES.forEach((name) => {
-    picked[name] = Array.isArray(state[name]) ? state[name] : []
+    picked[name] = Array.isArray(state[name]) ? dedupeById(state[name]) : []
   })
   SINGLETON_SLICES.forEach((name) => {
     picked[name] = state[name]
@@ -238,8 +175,24 @@ function pickSyncState(state) {
   return picked
 }
 
-function normalizeRemoteDoc(id, data) {
-  return { ...data, id: data?.id || id }
+function dedupeById(items) {
+  const seen = new Set()
+  return items.filter((item) => {
+    if (!item?.id) return false
+    if (seen.has(item.id)) return false
+    seen.add(item.id)
+    return true
+  })
+}
+
+function withSyncPath(error, path) {
+  error.syncPath = path
+  return error
+}
+
+function describeSyncError(error) {
+  const message = error?.message || 'Error de sincronizacion'
+  return error?.syncPath ? `${message} (${error.syncPath})` : message
 }
 
 function sanitizeForFirestore(value) {
